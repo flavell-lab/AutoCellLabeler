@@ -1,4 +1,4 @@
-def map_roi_to_neuron(file_path, confidence_threshold=3):
+def map_roi_to_neuron(file_path, confidence_threshold=2):
     # Ensure that the file exists
     try:
         df = pd.read_csv(file_path)
@@ -13,13 +13,15 @@ def map_roi_to_neuron(file_path, confidence_threshold=3):
     # Filter out rows with confidence below the threshold
     df = df[df.iloc[:, confidence_col] >= confidence_threshold]
     
-    # Initialize the dictionary
+    # Initialize the dictionaries
     neuron_mapping = {}
+    confidence_mapping = {}
     
     # Iterate over each row in the dataframe
     for _, row in df.iterrows():
         neuron_id = row.iloc[neuron_class_col]
         rois = str(row.iloc[roi_id_col]).split('/')
+        confidence_value = row.iloc[confidence_col]
         
         for roi in rois:
             # Convert roi to integer and handle any conversion errors
@@ -31,16 +33,19 @@ def map_roi_to_neuron(file_path, confidence_threshold=3):
             except ValueError:
                 continue
             
-            # Add the neuron ID to the dictionary
+            # Add the neuron ID to the neuron_mapping dictionary
             if roi in neuron_mapping:
                 if neuron_id not in neuron_mapping[roi]:
                     neuron_mapping[roi].append(neuron_id)
             else:
                 neuron_mapping[roi] = [neuron_id]
-    
-    return neuron_mapping
 
-def extract_neuron_ids_threshold(directory_path, threshold):
+            # Add the confidence value to the confidence_mapping dictionary
+            confidence_mapping[roi] = confidence_value
+    
+    return neuron_mapping, confidence_mapping
+
+def extract_neuron_ids_threshold(directory_path, threshold, confidence_threshold=3, exclude_question=True):
     # List all files in the directory that have a .csv extension and begin with '202'
     csv_files = [f for f in os.listdir(directory_path) 
                  if f.endswith('.csv') and f.startswith('202')]
@@ -51,12 +56,12 @@ def extract_neuron_ids_threshold(directory_path, threshold):
     # Process each CSV file
     for csv_file in csv_files:
         file_path = os.path.join(directory_path, csv_file)
-        neuron_mapping = map_roi_to_neuron(file_path)
+        neuron_mapping = map_roi_to_neuron(file_path, confidence_threshold)
         
         # Count neuron IDs while skipping IDs that contain '?' and 'alt'
         for neuron_ids in neuron_mapping.values():
             for neuron_id in neuron_ids:
-                if '?' not in neuron_id and 'alt' not in neuron_id:
+                if 'alt' not in neuron_id and (not exclude_question or '?' not in neuron_id):
                     neuron_ids_count[neuron_id] = neuron_ids_count.get(neuron_id, 0) + 1
     
     # Filter neuron IDs based on the threshold and return

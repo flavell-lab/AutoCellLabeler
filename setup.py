@@ -4,7 +4,7 @@ setup(
     name="autolabel",
     version="0.1",
     packages=find_packages(),
-    install_requires=["numpy", "pynrrd", "h5py", "tqdm", "openpyxl", "pandas"],
+    install_requires=["numpy", "pynrrd", "h5py", "tqdm", "openpyxl", "pandas", "matplotlib"],
     author="Adam Atanas",
     author_email="adamatanas@gmail.com",
     description="A Python package to automate NeuroPAL labeling via interfacing with a 3D-UNet.",
