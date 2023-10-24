@@ -1,4 +1,6 @@
 import h5py, nrrd, itertools, os, re, sys, csv
+import numpy as np
+import pandas as pd
 
 def generate_combinations(neuron_id):
     possibilities = ['D', 'V', 'L', 'R']

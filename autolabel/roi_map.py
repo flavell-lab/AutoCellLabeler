@@ -1,4 +1,5 @@
 import h5py, nrrd, itertools, os, re, sys, csv
+import pandas as pd
 
 
 def map_roi_to_neuron(file_path, confidence_threshold=2):

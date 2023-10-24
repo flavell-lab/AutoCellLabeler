@@ -1,5 +1,5 @@
 import h5py, nrrd, itertools, os, re, sys, csv
-
+import numpy as np
 
 def create_probability_dict(img_roi_path, unet_predictions_path, is_gt=False):
     # Step 1: Loading the Data
