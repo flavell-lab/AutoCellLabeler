@@ -1,3 +1,6 @@
+import openpyxl, csv
+
+
 def export_excel_to_csv(file_path, output_csv_path):
     # Open the Excel workbook
     wb = openpyxl.load_workbook(file_path)

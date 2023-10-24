@@ -1,3 +1,5 @@
+import h5py, nrrd, itertools, os, re, sys, csv
+
 def generate_combinations(neuron_id):
     possibilities = ['D', 'V', 'L', 'R']
     uncertain_count = neuron_id.count('?')
