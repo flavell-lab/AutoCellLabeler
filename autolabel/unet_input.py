@@ -8,13 +8,19 @@ def generate_combinations(neuron_id):
     combs = list(itertools.product(possibilities, repeat=uncertain_count))
     return [reduce(lambda x, y: x.replace('?', y, 1), comb, neuron_id) for comb in combs]
 
-def one_hot_encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weight, weight_reduction, id_weight, bkg_weight, min_confidence):
+
+def one_hot_encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weight, weight_reduction, id_weight, bkg_weight, min_confidence, num_labels):
     # Reading the CSV and NRRD files
     df = pd.read_csv(csv_file)
     data, _ = nrrd.read(nrrd_file)
     
+    foreground_mask = (data > 0)
+
     # Mapping Neuron IDs to ROI IDs
     roi_to_neuron, confidence_mapping = map_roi_to_neuron(csv_file, confidence_threshold=min_confidence)
+
+    roi_masks = {roi: (data == roi) for roi in roi_to_neuron.keys()}
+    roi_masks_nonmatch = {roi: np.logical_and(~roi_masks[roi], foreground_mask) for roi in roi_to_neuron.keys()}
 
     neuron_to_roi = {}
     for roi, neuron_ids in roi_to_neuron.items():
@@ -32,39 +38,32 @@ def one_hot_encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weig
     roi_weights = {}
 
     replaced_ids = {}
+
+    max_labels = max(num_labels.values()) 
     # Iterate over unique neuron IDs in neuron_to_roi
     for neuron_id in neuron_to_roi.keys():
-        if '?' in neuron_id:
-            valid_combinations = [comb for comb in generate_combinations(neuron_id) if comb in neuron_ids_list]
-            for valid_neuron_id in valid_combinations:
-                channel_idx = neuron_ids_list.index(valid_neuron_id)
-                if valid_neuron_id not in replaced_ids:
-                    replaced_ids[valid_neuron_id] = [neuron_id]
-                else:
-                    replaced_ids[valid_neuron_id].append(neuron_id)
-                process_neuron_id(channel_idx, neuron_id, neuron_to_roi, data, confidence_mapping, confidence_weight, neuron_ids_list, weight_reduction, one_hot_encoded, weight_array, roi_weights)
-        else:
-            if neuron_id in neuron_ids_list:
-                channel_idx = neuron_ids_list.index(neuron_id)
-                process_neuron_id(channel_idx, neuron_id, neuron_to_roi, data, confidence_mapping, confidence_weight, neuron_ids_list, weight_reduction, one_hot_encoded, weight_array, roi_weights)
+        if neuron_id in neuron_ids_list:
+            channel_idx = neuron_ids_list.index(neuron_id)
+            process_neuron_id(channel_idx, neuron_id, neuron_to_roi, data, confidence_mapping, confidence_weight, id_weight, max_labels, num_labels, neuron_ids_list, weight_reduction, one_hot_encoded, weight_array, roi_weights, roi_masks, roi_masks_nonmatch)
 
     # Loop through ROI weights to set non-ID channels
     for roi, weights in roi_weights.items():
-        mask = (data == roi)
+        mask = roi_masks[roi]
         max_weight = max(weights)
         # Step 2: Modify the list comprehension
         non_id_channels = [idx for idx, nid in enumerate(neuron_ids_list) 
                            if (nid not in replaced_ids or all([roi not in neuron_to_roi[id] for id in replaced_ids[nid]])) and 
                            (nid not in neuron_to_roi or roi not in neuron_to_roi[nid])]
         for idx in non_id_channels:
-            weight_array[idx][mask] = id_weight * max_weight
+            weight_array[idx][mask] = np.maximum(weight_array[idx][mask], id_weight * max_weight)
 
     return one_hot_encoded, weight_array
 
-def process_neuron_id(channel_idx, neuron_id, neuron_to_roi, data, confidence_mapping, confidence_weight, 
-                    neuron_ids_list, weight_reduction, one_hot_encoded, weight_array, roi_weights):
+def process_neuron_id(channel_idx, neuron_id, neuron_to_roi, data, confidence_mapping, confidence_weight, id_weight, max_labels, num_labels,
+                    neuron_ids_list, weight_reduction, one_hot_encoded, weight_array, roi_weights, roi_masks, roi_masks_nonmatch):
     for roi in neuron_to_roi[neuron_id]:
-        mask = (data == roi)
+        mask = roi_masks[roi]
+        mask_nonmatch = roi_masks_nonmatch[roi]
 
         # Apply confidence weight
         confidence_level = confidence_mapping[roi]
@@ -72,17 +71,12 @@ def process_neuron_id(channel_idx, neuron_id, neuron_to_roi, data, confidence_ma
 
         # Adjust weight for uncertain labels
         matches = [neuron_id]
-        if '?' in neuron_id:
-            matches = []
-            for comb in generate_combinations(neuron_id):
-                if comb in neuron_ids_list:
-                    matches.append(comb)
-            weight /= (weight_reduction ** (len(matches)-1))
 
-        for match in matches:
-            match_idx = neuron_ids_list.index(match)
+        for match_ in matches:
+            match_idx = neuron_ids_list.index(match_)
             one_hot_encoded[match_idx][mask] = 1
-            weight_array[match_idx][mask] = weight
+            weight_array[match_idx][mask] = weight * (max_labels / num_labels.get(neuron_id, 1))
+            weight_array[match_idx][mask_nonmatch] = id_weight * weight
 
         # Store the maximum weight for this ROI
         if roi in roi_weights:
@@ -91,8 +85,8 @@ def process_neuron_id(channel_idx, neuron_id, neuron_to_roi, data, confidence_ma
             roi_weights[roi] = [weight]
 
 def create_h5_from_nrrd(rgb_path, output_path, crop_roi_input_path, 
-                        crop_roi_output_path, crop_size, foreground_weights=[0.01, 0.2, 0.6, 0.9, 1.0], 
-                        question_weight_reduction=5, id_weight=0.2, background_weight=5e-4, min_confidence=2,
+                        crop_roi_output_path, crop_size, num_labels, foreground_weights=[0.01, 0.05, 0.6, 0.9, 1.0], 
+                        question_weight_reduction=5, id_weight=0.6, background_weight=np.float32(1e-3), min_confidence=2,
                         label_file=None, neuron_ids_list_file=None, all_red_path=None):
     
     def compute_crop_slices(center_of_mass, shape, crop_size):
@@ -142,7 +136,7 @@ def create_h5_from_nrrd(rgb_path, output_path, crop_roi_input_path,
         with h5py.File(neuron_ids_list_file, 'r') as f:
             ids_list = [name.decode('utf-8') for name in f['neuron_ids'][:]]
 
-        one_hot_encoded, weight_data = one_hot_encode_neurons(label_file, crop_roi_input_path, ids_list, foreground_weights, question_weight_reduction, id_weight, background_weight, min_confidence)
+        one_hot_encoded, weight_data = one_hot_encode_neurons(label_file, crop_roi_input_path, ids_list, foreground_weights, question_weight_reduction, id_weight, background_weight, min_confidence, num_labels)
         one_hot_encoded = np.transpose(one_hot_encoded, (0, 3, 2, 1))
 
         weight_data = np.transpose(weight_data, (0, 3, 2, 1))
