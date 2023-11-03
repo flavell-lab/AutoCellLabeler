@@ -24,7 +24,7 @@ def camera_align_images(fixed_img_path, moving_img_path, output_dir, parameter_f
         "-m", moving_img_path,
         "-out", output_dir,
         "-p", parameter_file,
-        "-threads", str(n_threads)
+        "-threads", str(num_threads)
     ]
     
     with open(os.path.join(output_dir_dataset, "elastix.log"), "w") as f:
