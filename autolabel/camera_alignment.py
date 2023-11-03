@@ -16,6 +16,7 @@ def camera_align_images(fixed_img_path, moving_img_path, output_dir, parameter_f
     if not os.path.exists(fixed_img_path) or not os.path.exists(moving_img_path):
         raise ValueError("One or both of the input files do not exist.")
     
+    os.makedirs(output_dir, exist_ok=True)
                 
     # Call elastix
     cmd = [
