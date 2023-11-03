@@ -1,7 +1,7 @@
 import os
 import subprocess
 
-def camera_align_images(fixed_img_path, moving_img_path, output_dir, parameter_file, n_threads=32):
+def camera_align_images(fixed_img_path, moving_img_path, output_dir, parameter_file, num_threads=32):
     """
     Perform camera alignment registration on two images using elastix.
     
