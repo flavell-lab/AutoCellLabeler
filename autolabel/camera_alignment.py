@@ -27,5 +27,5 @@ def camera_align_images(fixed_img_path, moving_img_path, output_dir, parameter_f
         "-threads", str(num_threads)
     ]
     
-    with open(os.path.join(output_dir_dataset, "elastix.log"), "w") as f:
+    with open(os.path.join(output_dir, "elastix.log"), "w") as f:
         subprocess.run(cmd, check=True, stdout=f, stderr=subprocess.STDOUT)
