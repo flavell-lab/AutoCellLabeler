@@ -85,7 +85,7 @@ def output_label_file(probability_dict, h5_path, nrrd_path, output_csv_path, max
 
         # Coordinates (center of mass for the ROI label)
         coordinates = np.argwhere(data == roi_id)
-        center_of_mass = tuple(map(int, coordinates.mean(axis=0)))
+        center_of_mass = tuple(map(lambda x: int(round(x)) + 1, coordinates.mean(axis=0)))
 
         # Add to list for further processing
         rois.append({
@@ -177,7 +177,7 @@ def output_label_file(probability_dict, h5_path, nrrd_path, output_csv_path, max
             confidence = 1
         elif 0.5 <= max_prob < 0.75:
             confidence = 2
-        elif 0.8 <= max_prob < 0.95:
+        elif 0.75 <= max_prob < 0.95:
             confidence = 3
         elif 0.95 <= max_prob < 0.99:
             confidence = 4
