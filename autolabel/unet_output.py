@@ -175,11 +175,11 @@ def output_label_file(probability_dict, h5_path, nrrd_path, output_csv_path, max
             confidence = 0
         elif max_prob < 0.5:
             confidence = 1
-        elif 0.5 <= max_prob < 0.75:
+        elif max_prob < 0.75:
             confidence = 2
-        elif 0.75 <= max_prob < 0.95:
+        elif max_prob < 0.95:
             confidence = 3
-        elif 0.95 <= max_prob < 0.99:
+        elif max_prob < 0.99:
             confidence = 4
         else:
             confidence = 5
