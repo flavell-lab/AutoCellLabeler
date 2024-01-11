@@ -59,7 +59,9 @@ def reorder_rois_by_max_prob(rois, roi_index):
 
 
 
-def output_label_file(probability_dict, h5_path, nrrd_path, output_csv_path, max_distance=8, max_prob_decrease=0.3, min_prob=0.01, exclude_rois=[]):
+def output_label_file(probability_dict, h5_path, nrrd_path, output_csv_path, max_distance=8, 
+        max_prob_decrease=0.3, min_prob=0.01, exclude_rois=[], lrswap_threshold=0.1,
+        repeatable_labels=["granule", "glia", "UNKNOWN"]):
     # Load the H5 file to get the name mapping
     with h5py.File(h5_path, 'r') as f:
         label_names = ["UNKNOWN"] + [name.decode('utf-8') for name in f['neuron_ids'][:]]
@@ -130,7 +132,8 @@ def output_label_file(probability_dict, h5_path, nrrd_path, output_csv_path, max
         used = False
         alt = False
         split_roi = None
-        if neuron_class in neuron_tracker:
+
+        if neuron_class in neuron_tracker and neuron_class not in repeatable_labels:
             for other_roi, other_roi_id, other_center_of_mass in neuron_tracker[neuron_class]:
                 distance = np.linalg.norm(np.array(center_of_mass) - np.array(other_center_of_mass))
                 if distance < max_distance:
@@ -167,6 +170,19 @@ def output_label_file(probability_dict, h5_path, nrrd_path, output_csv_path, max
 
         if not used and not alt:
             neuron_tracker.setdefault(neuron_class, []).append((count, roi_id, center_of_mass))
+
+        original_neuron_class = label_names[neuron_class_index]
+
+        for idx in sorted_indices:
+            if idx == neuron_class_index:
+                continue
+            if probabilities[idx] < lrswap_threshold:
+                continue
+            if swap_last_character(label_names[idx]) == original_neuron_class:
+                neuron_class = original_neuron_class[:-1] + "?" + ("-alt" if alt else "")
+                max_prob += probabilities[idx]
+                break
+
 
         if max_prob < min_prob:
             neuron_class = "UNKNOWN"
@@ -211,5 +227,13 @@ def output_label_file(probability_dict, h5_path, nrrd_path, output_csv_path, max
 
     return output_data
 
-# This is the final version of the function incorporating the adjustments.
-# You can use it in the same way as the previous versions of the function.
+def swap_last_character(s: str) -> str:
+    if not s:
+        return s
+    
+    if s[-1] == 'L':
+        return s[:-1] + 'R'
+    elif s[-1] == 'R':
+        return s[:-1] + 'L'
+    else:
+        return s
