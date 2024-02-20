@@ -1,7 +1,8 @@
 import h5py, nrrd, itertools, os, re, sys, csv
 import numpy as np
 
-def create_probability_dict(img_roi_path, unet_predictions_path, is_gt=False):
+def create_probability_dict(img_roi_path, unet_predictions_path, is_gt=False, roi_edge_value=0.01):
+    contaminated_rois = {}
     # Step 1: Loading the Data
     with h5py.File(img_roi_path, 'r') as f:
         img_roi_data = f['roi'][:]
@@ -25,20 +26,44 @@ def create_probability_dict(img_roi_path, unet_predictions_path, is_gt=False):
     
     for roi in unique_rois:
         roi_mask = img_roi_data == roi
-        
-        # Average Probability Strategy
-        avg_probs = unet_predictions[roi_mask].mean(axis=0)
-        
+
+        per_pixel_predictions = np.argmax(unet_predictions[roi_mask], axis=1)
+        unique_predictions = np.unique(per_pixel_predictions)
+        nonzero_unique_predictions = unique_predictions[unique_predictions != 0]
+        frequent_predictions = []
+        if len(nonzero_unique_predictions) > 1:
+            for prediction in nonzero_unique_predictions:
+                n_pred = len(per_pixel_predictions[per_pixel_predictions == prediction])
+                if n_pred >= 1:
+                    frequent_predictions.append((prediction, n_pred))
+            if len(frequent_predictions) > 1:
+                contaminated_rois[roi] = frequent_predictions
+
+        modified_mask = modify_edge_weights(roi_mask, roi_edge_value)
+
+        # Calculate weighted average probabilities
+        # First, ensure the mask is broadcastable over the predictions' shape
+        weights = modified_mask[roi_mask].reshape(-1, 1)
+        weighted_sum = (unet_predictions[roi_mask] * weights).sum(axis=0)
+
         # Normalization
+        # Use the sum of weights for normalization instead of the count of True values
+        total_weight = weights.sum()
+        if total_weight > 0:  # Avoid division by zero
+            avg_probs = weighted_sum / total_weight
+        else:
+            # Handle the case where total_weight is 0 to avoid division by zero
+            avg_probs = weighted_sum  # This case should be handled based on your application's needs
+
+        # Ensure the probabilities sum to 1 (normalization)
         avg_probs /= avg_probs.sum()
-        
-        # Convert to dictionary format
-        channel_probs = avg_probs
+
+        # Convert to dictionary format (assuming this part remains the same)
+        channel_probs = avg_probs        
         
         probability_dict[roi] = channel_probs
 
-    return probability_dict
-
+    return probability_dict, contaminated_rois
 
 def reorder_rois_by_max_prob(rois, roi_index):
     # Extract the ROI that needs to be moved
@@ -59,9 +84,9 @@ def reorder_rois_by_max_prob(rois, roi_index):
 
 
 
-def output_label_file(probability_dict, h5_path, nrrd_path, output_csv_path, max_distance=8, 
-        max_prob_decrease=0.3, min_prob=0.01, exclude_rois=[], lrswap_threshold=0.1,
-        repeatable_labels=["granule", "glia", "UNKNOWN"]):
+def output_label_file(probability_dict, contaminated_rois, h5_path, nrrd_path, output_csv_path, max_distance=8, 
+        max_prob_decrease=0.3, min_prob=0.01, exclude_rois=[], lrswap_threshold=0.1, roi_matches=None,
+        repeatable_labels=["granule", "glia", "UNKNOWN"], contamination_threshold=7, contamination_frac_threshold=0.15):
     # Load the H5 file to get the name mapping
     with h5py.File(h5_path, 'r') as f:
         label_names = ["UNKNOWN"] + [name.decode('utf-8') for name in f['neuron_ids'][:]]
@@ -137,7 +162,7 @@ def output_label_file(probability_dict, h5_path, nrrd_path, output_csv_path, max
             for other_roi, other_roi_id, other_center_of_mass in neuron_tracker[neuron_class]:
                 distance = np.linalg.norm(np.array(center_of_mass) - np.array(other_center_of_mass))
                 if distance < max_distance:
-                    output_data[other_roi]["notes"] += f"ROI likely merged with {roi_id}."
+                    output_data[other_roi]["notes"] += f"ROI likely merged with {roi_id}. "
                     split_roi = other_roi_id
                     break
 
@@ -183,7 +208,39 @@ def output_label_file(probability_dict, h5_path, nrrd_path, output_csv_path, max
                 max_prob += probabilities[idx]
                 break
 
+        contaminated = False
+        notes = f"ROI likely merged with {split_roi}." if split_roi is not None else ""
 
+        if roi_id in contaminated_rois:
+            contamination = contaminated_rois[roi_id]
+            max_contam = 0
+            max_contam_idx = -1
+            for (i, (label, contam)) in enumerate(contamination):
+                if contam > max_contam:
+                    max_contam = contam
+                    max_contam_idx = i
+            sum_nonmax_contam = 0
+            sum_tot_contam = 0
+            contam_to_txt = ""
+            for (i, (label, contam)) in enumerate(contamination):
+                if i != max_contam_idx:
+                    if "?" in neuron_class:
+                        legal_possibilities = [neuron_class, neuron_class[:-1] + "L", neuron_class[:-1] + "R"]
+                        if label in legal_possibilities:
+                            continue
+                    sum_nonmax_contam += contam
+                contam_to_txt += label_names[label] + ": " + str(contam) + ", " 
+                sum_tot_contam += contam
+
+            if contam_to_txt != "":
+                contam_to_txt = contam_to_txt[:-2]
+            if sum_nonmax_contam >= contamination_threshold or sum_nonmax_contam / sum_tot_contam >= contamination_frac_threshold:
+                notes += f"ROI possibly contaminated - " + contam_to_txt + ". "
+                contaminated = True
+
+        if roi_matches is not None and roi_matches[roi_id] == 0:
+            notes += "ROI not matched to freely-moving dataset. "
+        
         if max_prob < min_prob:
             neuron_class = "UNKNOWN"
         
@@ -200,10 +257,9 @@ def output_label_file(probability_dict, h5_path, nrrd_path, output_csv_path, max
         else:
             confidence = 5
 
-        if alt and confidence > 2:
+        if (alt or contaminated) and confidence > 2:
             confidence = 2
 
-        notes = f"ROI likely merged with {split_roi}." if split_roi is not None else ""
 
         output_data.append({
             "neuron_class": neuron_class,
@@ -226,6 +282,7 @@ def output_label_file(probability_dict, h5_path, nrrd_path, output_csv_path, max
             writer.writerow([data["neuron_class"], data["coordinates"], data["roi_id"], data["confidence"], data["alternatives"], data["notes"]])
 
     return output_data
+    
 
 def swap_last_character(s: str) -> str:
     if not s:
