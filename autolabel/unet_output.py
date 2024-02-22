@@ -1,7 +1,7 @@
 import h5py, nrrd, itertools, os, re, sys, csv
 import numpy as np
 
-def create_probability_dict(img_roi_path, unet_predictions_path, is_gt=False, roi_edge_value=0.01):
+def create_probability_dict(img_roi_path, unet_predictions_path, is_gt=False, roi_edge_value=0.01, contamination_threshold=0.75):
     contaminated_rois = {}
     # Step 1: Loading the Data
     with h5py.File(img_roi_path, 'r') as f:
@@ -28,6 +28,9 @@ def create_probability_dict(img_roi_path, unet_predictions_path, is_gt=False, ro
         roi_mask = img_roi_data == roi
 
         per_pixel_predictions = np.argmax(unet_predictions[roi_mask], axis=1)
+        per_pixel_confidence = np.max(unet_predictions[roi_mask], axis=1)
+        confidence_mask = per_pixel_confidence > contamination_threshold
+        per_pixel_predictions = per_pixel_predictions[confidence_mask]
         unique_predictions = np.unique(per_pixel_predictions)
         nonzero_unique_predictions = unique_predictions[unique_predictions != 0]
         frequent_predictions = []
@@ -84,8 +87,8 @@ def reorder_rois_by_max_prob(rois, roi_index):
 
 
 
-def output_label_file(probability_dict, contaminated_rois, h5_path, nrrd_path, output_csv_path, max_distance=8, 
-        max_prob_decrease=0.3, min_prob=0.01, exclude_rois=[], lrswap_threshold=0.1, roi_matches=None,
+def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, nrrd_path, output_csv_path, max_distance=8, 
+        max_prob_decrease=0.3, min_prob=0.01, exclude_rois=[], lrswap_threshold=0.1, roi_matches = None,
         repeatable_labels=["granule", "glia", "UNKNOWN"], contamination_threshold=7, contamination_frac_threshold=0.15):
     # Load the H5 file to get the name mapping
     with h5py.File(h5_path, 'r') as f:
@@ -220,21 +223,24 @@ def output_label_file(probability_dict, contaminated_rois, h5_path, nrrd_path, o
                     max_contam = contam
                     max_contam_idx = i
             sum_nonmax_contam = 0
-            sum_tot_contam = 0
             contam_to_txt = ""
             for (i, (label, contam)) in enumerate(contamination):
                 if i != max_contam_idx:
+                    exclude = False
                     if "?" in neuron_class:
                         legal_possibilities = [neuron_class, neuron_class[:-1] + "L", neuron_class[:-1] + "R"]
-                        if label in legal_possibilities:
-                            continue
-                    sum_nonmax_contam += contam
+                        if label_names[label] in legal_possibilities:
+                            exclude = True
+                    if not exclude:
+                        sum_nonmax_contam += contam
                 contam_to_txt += label_names[label] + ": " + str(contam) + ", " 
-                sum_tot_contam += contam
 
             if contam_to_txt != "":
                 contam_to_txt = contam_to_txt[:-2]
-            if sum_nonmax_contam >= contamination_threshold or sum_nonmax_contam / sum_tot_contam >= contamination_frac_threshold:
+            roi_size = roi_sizes.get(roi_id, 1)
+            if roi_size == 1:
+                print("WARNING: ROI size 1 for ROI ", roi_id, " in ", nrrd_path, ". Check for errors.")
+            if (sum_nonmax_contam >= contamination_threshold) or (sum_nonmax_contam / roi_size >= contamination_frac_threshold):
                 notes += f"ROI possibly contaminated - " + contam_to_txt + ". "
                 contaminated = True
 
@@ -282,7 +288,14 @@ def output_label_file(probability_dict, contaminated_rois, h5_path, nrrd_path, o
             writer.writerow([data["neuron_class"], data["coordinates"], data["roi_id"], data["confidence"], data["alternatives"], data["notes"]])
 
     return output_data
-    
+
+def get_roi_size(roi_path: str) -> int:
+    roi_sizes = {}
+    with h5py.File(roi_path, 'r') as f:
+        data = f["roi"][:]
+        for roi in range(1, np.max(data) + 1):
+            roi_sizes[roi] = np.sum(data == roi)
+    return roi_sizes
 
 def swap_last_character(s: str) -> str:
     if not s:
