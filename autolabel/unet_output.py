@@ -116,7 +116,7 @@ def reorder_rois_by_max_prob(rois, roi_index):
 
 
 def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, nrrd_path, output_csv_path, max_distance=8, 
-        max_prob_decrease=0.3, min_prob=0.01, exclude_rois=[], lrswap_threshold=0.1, roi_matches=None,
+        max_prob_decrease=0.3, min_prob=0.01, exclude_rois=[], lrswap_threshold=0.1, roi_matches=[],
         repeatable_labels=["granule", "glia", "UNKNOWN"], contamination_threshold=10, contamination_frac_threshold=0.2):
     # Load the H5 file to get the name mapping
     with h5py.File(h5_path, 'r') as f:
@@ -272,7 +272,7 @@ def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, n
                 notes += f"ROI possibly contaminated - " + contam_to_txt + ". "
                 contaminated = True
 
-        if roi_matches is not None and roi_matches[roi_id] == 0:
+        if roi_id > len(roi_matches) or roi_matches[roi_id-1] == 0:
             notes += "ROI not matched to freely-moving dataset. "
         
         if max_prob < min_prob:
