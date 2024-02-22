@@ -1,6 +1,34 @@
 import h5py, nrrd, itertools, os, re, sys, csv
 import numpy as np
 
+def modify_edge_weights(mask, new_value=0.01):
+    """
+    Modifies the edge pixels of a 3D binary mask by reducing their weights.
+
+    Parameters:
+    - mask: A 3D numpy array representing the binary mask.
+    - new_value: The new value to assign to edge pixels (default is 0.5).
+
+    Returns:
+    - A 3D numpy array with modified edge weights.
+    """
+    # Ensure new_value is less than 1
+    new_value = min(new_value, 1.0)
+
+    # Convert mask to float for manipulation
+    float_mask = mask.astype(float)
+
+    # Find edges by applying a gradient operator, summing the absolute values across each dimension
+    gradient = np.sum(np.abs(np.gradient(float_mask)), axis=0)
+
+    # Edge pixels will have a gradient greater than 0
+    edges = gradient > 0
+
+    # Reduce the weight of edge pixels
+    float_mask[edges] = new_value
+
+    return float_mask
+
 def create_probability_dict(img_roi_path, unet_predictions_path, is_gt=False, roi_edge_value=0.01, contamination_threshold=0.75):
     contaminated_rois = {}
     # Step 1: Loading the Data
