@@ -89,7 +89,7 @@ def reorder_rois_by_max_prob(rois, roi_index):
 
 def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, nrrd_path, output_csv_path, max_distance=8, 
         max_prob_decrease=0.3, min_prob=0.01, exclude_rois=[], lrswap_threshold=0.1, roi_matches=None,
-        repeatable_labels=["granule", "glia", "UNKNOWN"], contamination_threshold=7, contamination_frac_threshold=0.15):
+        repeatable_labels=["granule", "glia", "UNKNOWN"], contamination_threshold=10, contamination_frac_threshold=0.2):
     # Load the H5 file to get the name mapping
     with h5py.File(h5_path, 'r') as f:
         label_names = ["UNKNOWN"] + [name.decode('utf-8') for name in f['neuron_ids'][:]]
