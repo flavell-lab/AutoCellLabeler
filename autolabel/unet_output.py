@@ -114,10 +114,13 @@ def reorder_rois_by_max_prob(rois, roi_index):
     return rois
 
 
+# classes with too few detections in training data to believe the labels
+EXCLUDED_CLASSES = ['glia', 'granule', 'RIFL', 'RIFR', 'RIFL', 'RIFR', 'AFDL', 'AFDR', 'RMFL', 'RMFR', 'SIADL', 'SIADR', 'VA01', 'VD01', 'AVG', 'DD01', 'SABVL', 'SABVR', 'SABVL', 'SABVR', 'SIBDL', 'SIBDR', 'ADFL', 'RIGL', 'RIGR', 'RIGL', 'RIGR', 'AVFL', 'DB02']
 
 def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, nrrd_path, output_csv_path, max_distance=8, 
         max_prob_decrease=0.3, min_prob=0.01, exclude_rois=[], lrswap_threshold=0.1, roi_matches=[],
-        repeatable_labels=["granule", "glia", "UNKNOWN"], contamination_threshold=10, contamination_frac_threshold=0.2):
+        repeatable_labels=["granule", "glia", "UNKNOWN"], contamination_threshold=10, contamination_frac_threshold=0.2,
+        confidence_demote=2, excluded_classes=EXCLUDED_CLASSES):
     # Load the H5 file to get the name mapping
     with h5py.File(h5_path, 'r') as f:
         label_names = ["UNKNOWN"] + [name.decode('utf-8') for name in f['neuron_ids'][:]]
@@ -291,8 +294,8 @@ def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, n
         else:
             confidence = 5
 
-        if (alt or contaminated) and confidence > 2:
-            confidence = 2
+        if (alt or contaminated or original_neuron_class in excluded_classes) and confidence > confidence_demote:
+            confidence = confidence_demote
 
 
         output_data.append({
@@ -300,6 +303,9 @@ def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, n
             "coordinates": ",".join(map(str, center_of_mass)),
             "roi_id": roi_id,
             "confidence": confidence,
+            "max_prob": max_prob,
+            "alt": alt,
+            "contaminated": contaminated,
             "alternatives": alternatives_str,
             "notes": notes
         })
