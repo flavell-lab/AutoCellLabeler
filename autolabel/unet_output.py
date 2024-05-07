@@ -146,7 +146,10 @@ def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, n
 
         # Coordinates (center of mass for the ROI label)
         coordinates = np.argwhere(data == roi_id)
-        center_of_mass = tuple(map(lambda x: int(round(x)) + 1, coordinates.mean(axis=0)))
+        if len(coordinates) == 0:
+            center_of_mass = (0,0,0)
+        else:
+            center_of_mass = tuple(map(lambda x: int(round(x)) + 1, coordinates.mean(axis=0)))
 
         # Add to list for further processing
         rois.append({
