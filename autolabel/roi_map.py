@@ -2,7 +2,7 @@ import h5py, nrrd, itertools, os, re, sys, csv
 import pandas as pd
 
 
-def map_roi_to_neuron(file_path, confidence_threshold=2):
+def map_roi_to_neuron(file_path, confidence_threshold=2, exclude_rois=[0]):
     # Ensure that the file exists
     try:
         df = pd.read_csv(file_path)
@@ -35,6 +35,8 @@ def map_roi_to_neuron(file_path, confidence_threshold=2):
                 else:
                     roi = int(roi)
             except ValueError:
+                continue
+            if roi in exclude_rois:
                 continue
             
             # Add the neuron ID to the neuron_mapping dictionary
