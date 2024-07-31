@@ -9,7 +9,7 @@ def generate_combinations(neuron_id):
     return [reduce(lambda x, y: x.replace('?', y, 1), comb, neuron_id) for comb in combs]
 
 
-def one_hot_encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weight, weight_reduction, id_weight, bkg_weight, min_confidence, num_labels):
+def one_hot_encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weight, weight_reduction, id_weight, bkg_weight, min_confidence, num_labels, non_neuron_ids):
     # Reading the CSV and NRRD files
     df = pd.read_csv(csv_file)
     data, _ = nrrd.read(nrrd_file)
@@ -24,6 +24,8 @@ def one_hot_encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weig
 
     neuron_to_roi = {}
     for roi, neuron_ids in roi_to_neuron.items():
+        if len(neuron_ids) > 1: # Skip ROIs with multiple labels
+            continue
         for neuron_id in neuron_ids:
             if neuron_id in neuron_to_roi:
                 neuron_to_roi[neuron_id].append(roi)
@@ -33,13 +35,13 @@ def one_hot_encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weig
     # One-Hot Encoding and Weight Array
     output_shape = (len(neuron_ids_list),) + data.shape
     one_hot_encoded = np.zeros(output_shape, dtype=np.uint8)
-    weight_array = np.full(output_shape, bkg_weight, dtype=np.float32)  # Initialize with bkg_weight
+    weight_array = np.full(output_shape, bkg_weight, dtype=np.int32)  # Initialize with bkg_weight
 
     roi_weights = {}
 
     replaced_ids = {}
 
-    max_labels = max(num_labels.values()) 
+    max_labels = np.max([num_labels[x] for x in num_labels if x not in non_neuron_ids])
     # Iterate over unique neuron IDs in neuron_to_roi
     for neuron_id in neuron_to_roi.keys():
         if neuron_id in neuron_ids_list:
@@ -75,8 +77,8 @@ def process_neuron_id(channel_idx, neuron_id, neuron_to_roi, data, confidence_ma
         for match_ in matches:
             match_idx = neuron_ids_list.index(match_)
             one_hot_encoded[match_idx][mask] = 1
-            weight_array[match_idx][mask] = weight * (max_labels / num_labels.get(neuron_id, 1))
-            weight_array[match_idx][mask_nonmatch] = id_weight * weight
+            weight_array[match_idx][mask] = np.round(weight * (max_labels / num_labels.get(neuron_id, 1))).astype(np.int32)
+            weight_array[match_idx][mask_nonmatch] = np.round(id_weight * weight).astype(np.int32)
 
         # Store the maximum weight for this ROI
         if roi in roi_weights:
@@ -85,9 +87,9 @@ def process_neuron_id(channel_idx, neuron_id, neuron_to_roi, data, confidence_ma
             roi_weights[roi] = [weight]
 
 def create_h5_from_nrrd(rgb_path, output_path, crop_roi_input_path, 
-                        crop_roi_output_path, crop_size, num_labels, foreground_weights=[0.01, 0.05, 0.6, 0.9, 1.0], 
-                        question_weight_reduction=5, id_weight=0.6, background_weight=np.float32(1e-3), min_confidence=2,
-                        label_file=None, neuron_ids_list_file=None, all_red_path=None):
+                        crop_roi_output_path, crop_size, num_labels, θh_pos_is_ventral, foreground_weights=[10, 50, 600, 900, 1000], 
+                        question_weight_reduction=5, id_weight=0.3, background_weight=1, min_confidence=2,
+                        label_file=None, neuron_ids_list_file=None, all_red_path=None, non_neuron_ids=["granule", "glia"]):
     
     def compute_crop_slices(center_of_mass, shape, crop_size):
         slices = []
@@ -136,7 +138,7 @@ def create_h5_from_nrrd(rgb_path, output_path, crop_roi_input_path,
         with h5py.File(neuron_ids_list_file, 'r') as f:
             ids_list = [name.decode('utf-8') for name in f['neuron_ids'][:]]
 
-        one_hot_encoded, weight_data = one_hot_encode_neurons(label_file, crop_roi_input_path, ids_list, foreground_weights, question_weight_reduction, id_weight, background_weight, min_confidence, num_labels)
+        one_hot_encoded, weight_data = one_hot_encode_neurons(label_file, crop_roi_input_path, ids_list, foreground_weights, question_weight_reduction, id_weight, background_weight, min_confidence, num_labels, non_neuron_ids)
         one_hot_encoded = np.transpose(one_hot_encoded, (0, 3, 2, 1))
 
         weight_data = np.transpose(weight_data, (0, 3, 2, 1))
@@ -178,7 +180,7 @@ def create_h5_from_nrrd(rgb_path, output_path, crop_roi_input_path,
         one_hot_encoded = pad_with_background(one_hot_encoded, pad_width_one_hot)
 
         weight_data = weight_data[:, slices[0], slices[1], slices[2]]
-        weight_data = np.pad(weight_data, pad_width_one_hot, mode='constant', constant_values=0)
+        weight_data = np.pad(weight_data, pad_width_one_hot, mode='constant', constant_values=background_weight)
     else:
         weight_data = None
 
@@ -193,6 +195,17 @@ def create_h5_from_nrrd(rgb_path, output_path, crop_roi_input_path,
                           max((crop_size[dim] - img_roi.shape[dim]) // 2, 0), 0))
                      for dim in range(3)]
     img_roi = np.pad(img_roi, pad_width_roi, mode='constant', constant_values=0)
+
+    # If θh_pos_is_ventral is False, rotate image by 180 degrees about x-axis
+    if not θh_pos_is_ventral:
+        channels_rgb = [np.rot90(img_rgb[c,:,:,:], 2, (0,1)) for c in range(img_rgb.shape[0])]
+        img_rgb = np.stack(channels_rgb, axis=0)
+        img_roi = np.rot90(img_roi, 2, (0,1))
+        if label_file is not None:
+            one_hot_encoded_channels = [np.rot90(one_hot_encoded[c,:,:,:], 2, (0,1)) for c in range(one_hot_encoded.shape[0])]
+            one_hot_encoded = np.stack(one_hot_encoded_channels, axis=0)
+            weight_data_channels = [np.rot90(weight_data[c,:,:,:], 2, (0,1)) for c in range(weight_data.shape[0])]
+            weight_data = np.stack(weight_data_channels, axis=0)
     
     with h5py.File(output_path, 'w') as f:
         f.create_dataset('raw', data=img_rgb)
