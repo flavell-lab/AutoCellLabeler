@@ -1,7 +1,7 @@
 import openpyxl, csv
 
 
-def export_excel_to_csv(file_path, output_csv_path):
+def export_excel_to_csv(file_path, output_csv_path, dataset):
     # Open the Excel workbook
     wb = openpyxl.load_workbook(file_path)
     
@@ -9,7 +9,7 @@ def export_excel_to_csv(file_path, output_csv_path):
     sheet_names = wb.sheetnames
     
     # Filter the sheet names
-    filtered_sheet_names = [name for name in sheet_names if "labels" in name and "progress" not in name and "alt" not in name]
+    filtered_sheet_names = [name for name in sheet_names if ("labels" in name or dataset in name) and "progress" not in name and "alt" not in name]
     
     # Select the last sheet name from the filtered list
     selected_sheet_name = filtered_sheet_names[-1]
