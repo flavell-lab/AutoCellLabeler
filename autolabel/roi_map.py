@@ -2,7 +2,7 @@ import h5py, nrrd, itertools, os, re, sys, csv
 import pandas as pd
 
 
-def map_roi_to_neuron(file_path, confidence_threshold=2):
+def map_roi_to_neuron(file_path, confidence_threshold=2, output_comments=False):
     # Ensure that the file exists
     try:
         df = pd.read_csv(file_path)
@@ -13,6 +13,7 @@ def map_roi_to_neuron(file_path, confidence_threshold=2):
     neuron_class_col = 0
     roi_id_col = 2
     confidence_col = 3
+    comments_col = 4
 
     # Filter out rows with confidence below the threshold
     df = df[df.iloc[:, confidence_col] >= confidence_threshold]
@@ -20,6 +21,7 @@ def map_roi_to_neuron(file_path, confidence_threshold=2):
     # Initialize the dictionaries
     neuron_mapping = {}
     confidence_mapping = {}
+    comments = {}
     
     # Iterate over each row in the dataframe
     for _, row in df.iterrows():
@@ -46,8 +48,14 @@ def map_roi_to_neuron(file_path, confidence_threshold=2):
 
             # Add the confidence value to the confidence_mapping dictionary
             confidence_mapping[roi] = confidence_value
+
+            if output_comments:
+                comments[roi] = row.iloc[comments_col]
     
+    if output_comments:
+        return neuron_mapping, confidence_mapping, comments
     return neuron_mapping, confidence_mapping
+
 
 def extract_neuron_ids_threshold(directory_path, threshold, confidence_threshold=3, exclude_question=True):
     # List all files in the directory that have a .csv extension and begin with '202'
