@@ -16,7 +16,7 @@ The name of the installed package is `autolabel`. You will also want to install 
 
 ## Create training data
 
-To create training data from AutoCellLabeler from a set of multi-spectral images and human labels in CSV format, see [this notebook](https://github.com/flavell-lab/AutoCellLabeler/notebook/make_AutoCellLabeler_input.ipynb).
+To create training data from AutoCellLabeler from a set of multi-spectral images and human labels in CSV format, see the `make_AutoCellLabeler_input.ipynb` notebook in this package.
 
 ## Citation
 
