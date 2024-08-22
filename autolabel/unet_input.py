@@ -8,6 +8,50 @@ def generate_combinations(neuron_id):
     combs = list(itertools.product(possibilities, repeat=uncertain_count))
     return [reduce(lambda x, y: x.replace('?', y, 1), comb, neuron_id) for comb in combs]
 
+def expand_nrrd_dimension(input_filepath, output_filepath):
+    """
+    Expands a 3D NRRD image by adding an extra dimension to create a 4D image.
+
+    This function reads a 3D NRRD image from the specified input file, adds an 
+    extra dimension to the image, and saves the resulting 4D image to the specified 
+    output file. The added dimension is inserted as the first dimension, effectively 
+    converting the original image shape from (X, Y, Z) to (X, Y, Z, 1).
+
+    Parameters:
+    ----------
+    input_filepath : str
+        Path to the input NRRD file containing the 3D image.
+    output_filepath : str
+        Path to the output NRRD file where the 4D image will be saved.
+
+    Raises:
+    ------
+    ValueError
+        If the input image is not a 3D NRRD image.
+
+    Example:
+    --------
+    expand_nrrd_dimension('input.nrrd', 'output.nrrd')
+    """
+    # Read the original 3D NRRD image and its header
+    data, header = nrrd.read(input_filepath)
+    
+    # Check if the image is indeed 3D
+    if data.ndim != 3:
+        raise ValueError("Input image must be a 3D NRRD image.")
+    
+    # Add an extra dimension
+    data_4d = np.expand_dims(data, axis=3)
+    
+    # Update the header for the new dimension
+    header['sizes'] = [1] + list(data.shape)
+    
+    # Write the new 4D NRRD image to output file
+    nrrd.write(output_filepath, data_4d, header)
+
+
+
+
 
 def one_hot_encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weight, weight_reduction, id_weight, bkg_weight, min_confidence, num_labels, non_neuron_ids):
     # Reading the CSV and NRRD files
