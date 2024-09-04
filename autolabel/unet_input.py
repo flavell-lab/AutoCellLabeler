@@ -1,6 +1,8 @@
+from functools import reduce
 import h5py, nrrd, itertools, os, re, sys, csv
 import numpy as np
 import pandas as pd
+from AutoCellLabeler.autolabel.roi_map import map_roi_to_neuron
 
 def generate_combinations(neuron_id):
     possibilities = ['D', 'V', 'L', 'R']
@@ -49,10 +51,8 @@ def expand_nrrd_dimension(input_filepath, output_filepath):
     # Write the new 4D NRRD image to output file
     nrrd.write(output_filepath, data_4d, header)
 
-
-
-
-
+# Use one-hot encoding, but collapse the weights to reduce memory overhead.
+# Future directions could include collapsing label or using floats for uncertainty
 def one_hot_encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weight, weight_reduction, id_weight, bkg_weight, min_confidence, num_labels, non_neuron_ids):
     # Reading the CSV and NRRD files
     df = pd.read_csv(csv_file)
@@ -250,12 +250,18 @@ def create_h5_from_nrrd(rgb_path, output_path, crop_roi_input_path,
             one_hot_encoded = np.stack(one_hot_encoded_channels, axis=0)
             weight_data_channels = [np.rot90(weight_data[c,:,:,:], 2, (0,1)) for c in range(weight_data.shape[0])]
             weight_data = np.stack(weight_data_channels, axis=0)
+
+    # Collapse the weights - this is not the most efficient way to go about doing this, should just do it from the get-go
+    masked_weights = weight_data * one_hot_encoded
+    collapsed_weights = np.max(masked_weights, axis = 0)
+    collapsed_weights = np.expand_dims(collapsed_weights, axis=0)
+
     
     with h5py.File(output_path, 'w') as f:
         f.create_dataset('raw', data=img_rgb)
         if label_file is not None:
             f.create_dataset('label', data=one_hot_encoded)
-            f.create_dataset('weight', data=weight_data)
+            f.create_dataset('weight', data=collapsed_weights)
 
     with h5py.File(crop_roi_output_path, 'w') as f:
         f.create_dataset('roi', data=img_roi)
