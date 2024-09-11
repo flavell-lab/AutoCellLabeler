@@ -2,7 +2,12 @@ from functools import reduce
 import h5py, nrrd, itertools, os, re, sys, csv
 import numpy as np
 import pandas as pd
-from AutoCellLabeler.autolabel.roi_map import map_roi_to_neuron
+
+from autolabel.roi_map import map_roi_to_neuron
+
+RAW_DTYPE = np.uint16
+LABEL_DTYPE = np.uint8
+WEIGHT_DTYPE = np.uint16
 
 def generate_combinations(neuron_id):
     possibilities = ['D', 'V', 'L', 'R']
@@ -51,62 +56,57 @@ def expand_nrrd_dimension(input_filepath, output_filepath):
     # Write the new 4D NRRD image to output file
     nrrd.write(output_filepath, data_4d, header)
 
-# Use one-hot encoding, but collapse the weights to reduce memory overhead.
-# Future directions could include collapsing label or using floats for uncertainty
-def one_hot_encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weight, weight_reduction, id_weight, bkg_weight, min_confidence, num_labels, non_neuron_ids):
+
+# Encodes neurons with collapsed (3D) labels and weights.
+def encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weight, weight_reduction, id_weight, bkg_weight, min_confidence, num_labels, non_neuron_ids):
     # Reading the CSV and NRRD files
     df = pd.read_csv(csv_file)
-    data, _ = nrrd.read(nrrd_file)
-    
+    data, _ = nrrd.read(nrrd_file) # ROIs
+
     foreground_mask = (data > 0)
 
     # Mapping Neuron IDs to ROI IDs
     roi_to_neuron, confidence_mapping = map_roi_to_neuron(csv_file, confidence_threshold=min_confidence)
 
+    # Generate mask images for each ROI
     roi_masks = {roi: (data == roi) for roi in roi_to_neuron.keys()}
     roi_masks_nonmatch = {roi: np.logical_and(~roi_masks[roi], foreground_mask) for roi in roi_to_neuron.keys()}
 
+
     neuron_to_roi = {}
     for roi, neuron_ids in roi_to_neuron.items():
-        if len(neuron_ids) > 1: # Skip ROIs with multiple labels
-            continue
+        if len(neuron_ids) > 1:
+            continue # For now we'll skip multiple labeled ROIs, but might want to come back and look at this - TODO
+
         for neuron_id in neuron_ids:
-            if neuron_id in neuron_to_roi:
+            if neuron_id in neuron_to_roi: # One neuron can have multiple ROIs
                 neuron_to_roi[neuron_id].append(roi)
             else:
                 neuron_to_roi[neuron_id] = [roi]
-
-    # One-Hot Encoding and Weight Array
-    output_shape = (len(neuron_ids_list),) + data.shape
-    one_hot_encoded = np.zeros(output_shape, dtype=np.uint8)
-    weight_array = np.full(output_shape, bkg_weight, dtype=np.int32)  # Initialize with bkg_weight
-
+    
     roi_weights = {}
 
-    replaced_ids = {}
-
+    # One-Hot Encoding and Weight Array
+    encoded_labels = np.zeros(data.shape, dtype=LABEL_DTYPE) # We might need to increase the dtype if we pick up more neurons
+    weight_array = np.full(data.shape, bkg_weight, dtype=WEIGHT_DTYPE)  # Initialize with bkg_weight
     max_labels = np.max([num_labels[x] for x in num_labels if x not in non_neuron_ids])
+    
     # Iterate over unique neuron IDs in neuron_to_roi
     for neuron_id in neuron_to_roi.keys():
         if neuron_id in neuron_ids_list:
-            channel_idx = neuron_ids_list.index(neuron_id)
-            process_neuron_id(channel_idx, neuron_id, neuron_to_roi, data, confidence_mapping, confidence_weight, id_weight, max_labels, num_labels, neuron_ids_list, weight_reduction, one_hot_encoded, weight_array, roi_weights, roi_masks, roi_masks_nonmatch)
+            process_neuron_id(neuron_id, neuron_to_roi, data, confidence_mapping, confidence_weight, id_weight, max_labels, num_labels, neuron_ids_list, weight_reduction, encoded_labels, weight_array, roi_weights, roi_masks, roi_masks_nonmatch)
 
     # Loop through ROI weights to set non-ID channels
     for roi, weights in roi_weights.items():
         mask = roi_masks[roi]
         max_weight = max(weights)
-        # Step 2: Modify the list comprehension
-        non_id_channels = [idx for idx, nid in enumerate(neuron_ids_list) 
-                           if (nid not in replaced_ids or all([roi not in neuron_to_roi[id] for id in replaced_ids[nid]])) and 
-                           (nid not in neuron_to_roi or roi not in neuron_to_roi[nid])]
-        for idx in non_id_channels:
-            weight_array[idx][mask] = np.maximum(weight_array[idx][mask], id_weight * max_weight)
+        weight_array[mask] = np.maximum(weight_array[mask], id_weight * max_weight)
 
-    return one_hot_encoded, weight_array
+    return encoded_labels, weight_array
 
-def process_neuron_id(channel_idx, neuron_id, neuron_to_roi, data, confidence_mapping, confidence_weight, id_weight, max_labels, num_labels,
-                    neuron_ids_list, weight_reduction, one_hot_encoded, weight_array, roi_weights, roi_masks, roi_masks_nonmatch):
+
+def process_neuron_id(neuron_id, neuron_to_roi, data, confidence_mapping, confidence_weight, id_weight, max_labels, num_labels,
+                    neuron_ids_list, weight_reduction, encoded_labels, weight_array, roi_weights, roi_masks, roi_masks_nonmatch):
     for roi in neuron_to_roi[neuron_id]:
         mask = roi_masks[roi]
         mask_nonmatch = roi_masks_nonmatch[roi]
@@ -117,12 +117,17 @@ def process_neuron_id(channel_idx, neuron_id, neuron_to_roi, data, confidence_ma
 
         # Adjust weight for uncertain labels
         matches = [neuron_id]
-
         for match_ in matches:
             match_idx = neuron_ids_list.index(match_)
-            one_hot_encoded[match_idx][mask] = 1
-            weight_array[match_idx][mask] = np.round(weight * (max_labels / num_labels.get(neuron_id, 1))).astype(np.int32)
-            weight_array[match_idx][mask_nonmatch] = np.round(id_weight * weight).astype(np.int32)
+            if match_idx == 0:
+                ValueError("Same ID as background")
+            encoded_labels[mask] = match_idx
+            
+            weight_array[mask] = np.round(weight * (max_labels / num_labels.get(neuron_id, 1))).astype(WEIGHT_DTYPE)
+
+            # The idea here is that we can punish the network more for incorrectly labeling something as something that's already been labeled
+            # But we want to make sure we don't overrule an actual label's weight
+            weight_array[mask_nonmatch] = np.maximum(weight_array[mask_nonmatch], np.round(id_weight * weight).astype(WEIGHT_DTYPE))
 
         # Store the maximum weight for this ROI
         if roi in roi_weights:
@@ -151,28 +156,27 @@ def create_h5_from_nrrd(rgb_path, output_path, crop_roi_input_path,
 
     def pad_with_background(data, pad_width):
         # Pad the background channel with ones
-        data_padded_background = np.pad(data[0:1, :, :, :], pad_width, mode='constant', constant_values=1)
+        # data_padded_background = np.pad(data[0:1, :, :, :], pad_width, mode='constant', constant_values=1)
         # Pad the other channels with zeros
-        data_padded_others = np.pad(data[1:, :, :, :], pad_width, mode='constant', constant_values=0)
-        return np.concatenate([data_padded_background, data_padded_others], axis=0)
+        data_padded_others = np.pad(data, pad_width, mode='constant', constant_values=0)
+        return data_padded_others #np.concatenate([data_padded_background, data_padded_others], axis=0)
     
     # Step 1: Reading the NRRD file
     img_rgb, _ = nrrd.read(rgb_path)
     
     # Round median value, set negative values to 0, and convert to uint16
-    median_val = np.round(np.median(img_rgb)).astype(np.uint16)
+    median_val = np.round(np.median(img_rgb)).astype(RAW_DTYPE)
     img_rgb[img_rgb < 0] = 0
 
     # If all_red_path is provided, read the NRRD file and append it to img_rgb
     if all_red_path is not None:
         img_red, _ = nrrd.read(all_red_path)
         img_rgb = np.concatenate([img_rgb, img_red[..., np.newaxis]], axis=-1)
-
-        img_rgb = img_rgb.astype(np.uint16)
+        img_rgb = img_rgb.astype(RAW_DTYPE)
 
     
     # Permute dimensions for the img_rgb from WxHxDxC to CxDxHxW
-    img_rgb = np.transpose(img_rgb, (3, 2, 1, 0))
+    img_rgb = np.transpose(img_rgb, (3, 2, 1, 0)) # Brian: ok but isn't it faster to have color last?
 
     img_roi, _ = nrrd.read(crop_roi_input_path)
     # Permute dimensions for the img_roi data from WxHxD to DxHxW
@@ -180,15 +184,13 @@ def create_h5_from_nrrd(rgb_path, output_path, crop_roi_input_path,
 
     if label_file is not None and neuron_ids_list_file is not None:
         with h5py.File(neuron_ids_list_file, 'r') as f:
-            ids_list = [name.decode('utf-8') for name in f['neuron_ids'][:]]
+            ids_list = ["BACKGROUND"] + [name.decode('utf-8') for name in f['neuron_ids'][:]] # Adding "background" ensures the label 0 is reserved
 
-        one_hot_encoded, weight_data = one_hot_encode_neurons(label_file, crop_roi_input_path, ids_list, foreground_weights, question_weight_reduction, id_weight, background_weight, min_confidence, num_labels, non_neuron_ids)
-        one_hot_encoded = np.transpose(one_hot_encoded, (0, 3, 2, 1))
+        encoded_labels, weight_data = encode_neurons(label_file, crop_roi_input_path, ids_list, foreground_weights, question_weight_reduction, id_weight, background_weight, min_confidence, num_labels, non_neuron_ids)
 
-        weight_data = np.transpose(weight_data, (0, 3, 2, 1))
-        background_mask = np.logical_not(one_hot_encoded.sum(axis=0, keepdims=True).astype(bool))
-        one_hot_encoded = np.concatenate([background_mask, one_hot_encoded], axis=0)
-        weight_data = np.concatenate([np.full(weight_data[0:1,:,:,:].shape, background_weight), weight_data], axis=0)
+        # Permute dimensions from WxHxD to DxHxW
+        encoded_labels = np.transpose(encoded_labels, (2, 1, 0))
+        weight_data = np.transpose(weight_data, (2, 1, 0))
     
     center_of_mass = np.round(np.array(np.unravel_index(np.argmax(img_roi), img_roi.shape))).astype(int)
     
@@ -213,17 +215,17 @@ def create_h5_from_nrrd(rgb_path, output_path, crop_roi_input_path,
     img_rgb = img_rgb[:, slices[0], slices[1], slices[2]]
     img_roi = img_roi[slices[0], slices[1], slices[2]]
 
-    # If one_hot_encoded data is provided, crop and pad it
+    # If encoded_labels data is provided, crop and pad it
     if label_file is not None:
-        one_hot_encoded = one_hot_encoded[:, slices[0], slices[1], slices[2]]
-        pad_width_one_hot = [(0, 0)] + [(max((crop_size[dim] - one_hot_encoded.shape[dim+1]) // 2, 0),
-                                        max(crop_size[dim] - one_hot_encoded.shape[dim+1] - 
-                                            max((crop_size[dim] - one_hot_encoded.shape[dim+1]) // 2, 0), 0))
+        encoded_labels = encoded_labels[slices[0], slices[1], slices[2]]
+        pad_width_one_hot = [(max((crop_size[dim] - encoded_labels.shape[dim]) // 2, 0),
+                                        max(crop_size[dim] - encoded_labels.shape[dim] - 
+                                            max((crop_size[dim] - encoded_labels.shape[dim]) // 2, 0), 0))
                                        for dim in range(3)]
-        # Use the custom padding function for one_hot_encoded
-        one_hot_encoded = pad_with_background(one_hot_encoded, pad_width_one_hot)
+        # Use the custom padding function for encoded_labels
+        encoded_labels = pad_with_background(encoded_labels, pad_width_one_hot)
 
-        weight_data = weight_data[:, slices[0], slices[1], slices[2]]
+        weight_data = weight_data[slices[0], slices[1], slices[2]]
         weight_data = np.pad(weight_data, pad_width_one_hot, mode='constant', constant_values=background_weight)
     else:
         weight_data = None
@@ -246,22 +248,15 @@ def create_h5_from_nrrd(rgb_path, output_path, crop_roi_input_path,
         img_rgb = np.stack(channels_rgb, axis=0)
         img_roi = np.rot90(img_roi, 2, (0,1))
         if label_file is not None:
-            one_hot_encoded_channels = [np.rot90(one_hot_encoded[c,:,:,:], 2, (0,1)) for c in range(one_hot_encoded.shape[0])]
-            one_hot_encoded = np.stack(one_hot_encoded_channels, axis=0)
-            weight_data_channels = [np.rot90(weight_data[c,:,:,:], 2, (0,1)) for c in range(weight_data.shape[0])]
-            weight_data = np.stack(weight_data_channels, axis=0)
-
-    # Collapse the weights - this is not the most efficient way to go about doing this, should just do it from the get-go
-    masked_weights = weight_data * one_hot_encoded
-    collapsed_weights = np.max(masked_weights, axis = 0)
-    collapsed_weights = np.expand_dims(collapsed_weights, axis=0)
+            encoded_labels = np.rot90(encoded_labels, 2, (0, 1))
+            weight_data = np.rot90(weight_data, 2, (0,1))
 
     
     with h5py.File(output_path, 'w') as f:
         f.create_dataset('raw', data=img_rgb)
         if label_file is not None:
-            f.create_dataset('label', data=one_hot_encoded)
-            f.create_dataset('weight', data=collapsed_weights)
+            f.create_dataset('label', data=encoded_labels)
+            f.create_dataset('weight', data=weight_data)
 
     with h5py.File(crop_roi_output_path, 'w') as f:
         f.create_dataset('roi', data=img_roi)
