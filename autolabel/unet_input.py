@@ -1,8 +1,22 @@
+from functools import reduce
 import h5py, nrrd, itertools, os, re, sys, csv
 import numpy as np
 import pandas as pd
 
 def generate_combinations(neuron_id):
+    """
+    Generates all possible combinations for a neuron ID by replacing each '?' with 'D', 'V', 'L', or 'R'.
+
+    This function takes a neuron ID string that may contain one or more '?' characters, which represent 
+    uncertain positions. It generates all possible combinations by replacing each '?' with every 
+    combination of the characters 'D', 'V', 'L', and 'R'.
+
+    Args:
+        neuron_id (str): The neuron ID containing zero or more '?' characters indicating uncertainty.
+
+    Returns:
+        list: A list of strings representing all possible combinations of the neuron ID with '?' replaced.
+    """
     possibilities = ['D', 'V', 'L', 'R']
     uncertain_count = neuron_id.count('?')
     combs = list(itertools.product(possibilities, repeat=uncertain_count))
@@ -50,10 +64,40 @@ def expand_nrrd_dimension(input_filepath, output_filepath):
     nrrd.write(output_filepath, data_4d, header)
 
 
-
-
-
 def one_hot_encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weight, weight_reduction, id_weight, bkg_weight, min_confidence, num_labels, non_neuron_ids):
+    """
+    Generates one-hot encoded labels and a corresponding weight array for neuron segmentation and labeling tasks.
+
+    Parameters
+    ----------
+    csv_file : str
+        Path to the CSV file containing human labels comprised of neuron ID and ROI mappings.
+    nrrd_file : str
+        Path to the NRRD file containing ROI data.
+    neuron_ids_list : list of str
+        List of neuron IDs to be included in the encoding.
+    confidence_weight : list of float
+        Weights corresponding to different confidence levels in the ROI mappings.
+    weight_reduction : float
+        Reduction factor for weights associated with uncertain labels (ie: labels with "?" in them). Currently disabled.
+    id_weight : float
+        Weight assigned to non-target neuron IDs in the weight array.
+    bkg_weight : float
+        Weight assigned to the background in the weight array.
+    min_confidence : int
+        Minimum confidence level to consider in the ROI to neuron mapping.
+    num_labels : dict
+        Dictionary mapping neuron IDs to the number of labels associated with them.
+    non_neuron_ids : list of str
+        List of IDs that are not neurons (e.g., "granule", "glia").
+
+    Returns
+    -------
+    one_hot_encoded : numpy.ndarray
+        The one-hot encoded label data with shape (num_neurons, height, width, depth).
+    weight_array : numpy.ndarray
+        The corresponding weight array for the labels with the same shape as `one_hot_encoded`.
+    """
     # Reading the CSV and NRRD files
     df = pd.read_csv(csv_file)
     data, _ = nrrd.read(nrrd_file)
@@ -107,6 +151,49 @@ def one_hot_encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weig
 
 def process_neuron_id(channel_idx, neuron_id, neuron_to_roi, data, confidence_mapping, confidence_weight, id_weight, max_labels, num_labels,
                     neuron_ids_list, weight_reduction, one_hot_encoded, weight_array, roi_weights, roi_masks, roi_masks_nonmatch):
+    """
+    Updates the one-hot encoded labels and weight arrays for a specific neuron ID.
+
+    Parameters
+    ----------
+    channel_idx : int
+        Index of the neuron ID in `neuron_ids_list`. Not used.
+    neuron_id : str
+        Neuron ID to process.
+    neuron_to_roi : dict
+        Mapping from neuron IDs to their associated ROIs, from human labelers.
+    data : numpy.ndarray
+        ROI data from the NRRD file.
+    confidence_mapping : dict
+        Mapping from ROIs to confidence levels.
+    confidence_weight : list of float
+        Weights corresponding to different confidence levels in the ROI mappings.
+    id_weight : float
+        Weight assigned to non-target neuron IDs in the weight array.
+    max_labels : int
+        Maximum number of labels associated with any neuron ID.
+    num_labels : dict
+        Dictionary mapping neuron IDs to the number of labels associated with them.
+    neuron_ids_list : list of str
+        List of neuron IDs to be included in the encoding.
+    weight_reduction : float
+        Reduction factor for weights associated with uncertain labels (ie: labels with "?" in them). Currently disabled.
+    one_hot_encoded : numpy.ndarray
+        The one-hot encoded label data being updated.
+    weight_array : numpy.ndarray
+        The weight array being updated.
+    roi_weights : dict
+        Dictionary to store weights for each ROI.
+    roi_masks : dict
+        Dictionary of masks for each ROI.
+    roi_masks_nonmatch : dict
+        Dictionary of masks for regions not matching each ROI.
+
+    Returns
+    -------
+    None
+        Updates `one_hot_encoded`, `weight_array`, and `roi_weights` in place.
+    """
     for roi in neuron_to_roi[neuron_id]:
         mask = roi_masks[roi]
         mask_nonmatch = roi_masks_nonmatch[roi]
@@ -134,8 +221,68 @@ def create_h5_from_nrrd(rgb_path, output_path, crop_roi_input_path,
                         crop_roi_output_path, crop_size, num_labels, θh_pos_is_ventral, foreground_weights=[10, 50, 600, 900, 1000], 
                         question_weight_reduction=5, id_weight=0.3, background_weight=1, min_confidence=2,
                         label_file=None, neuron_ids_list_file=None, all_red_path=None, non_neuron_ids=["granule", "glia"]):
+    """
+    Creates an HDF5 file from NRRD image data for neuron segmentation and labeling, including optional labels and weights.
+
+    Parameters
+    ----------
+    rgb_path : str
+        Path to the NRRD file containing the RGB image data.
+    output_path : str
+        Path to the output HDF5 file to be created.
+    crop_roi_input_path : str
+        Path to the NRRD file containing the ROI data for cropping.
+    crop_roi_output_path : str
+        Path to the output HDF5 file for the cropped ROI data.
+    crop_size : tuple of int
+        The size of the crop (depth, height, width).
+    num_labels : dict
+        Dictionary mapping neuron IDs to the number of labels associated with them.
+    θh_pos_is_ventral : bool
+        Flag indicating the orientation of the image; if False, the image is rotated 180 degrees about the y-axis.
+    foreground_weights : list of float, optional
+        Weights for different confidence levels in foreground labeling.
+    question_weight_reduction : float, optional
+        Reduction factor for weights associated with uncertain labels (ie: labels with "?" in them). Currently disabled.
+    id_weight : float, optional
+        Weight assigned to non-target neuron IDs in the weight array.
+    background_weight : float, optional
+        Weight assigned to the background in the weight array.
+    min_confidence : int, optional
+        Minimum confidence level to consider in the ROI to neuron mapping.
+    label_file : str, optional
+        Path to the CSV file containing human labels consisting of neuron ID and ROI mappings.
+    neuron_ids_list_file : str, optional
+        Path to the HDF5 file containing the list of neuron IDs.
+    all_red_path : str, optional
+        Path to an additional NRRD file containing TagRFP data to be concatenated with the RGB data to create the full 4D image.
+    non_neuron_ids : list of str, optional
+        List of IDs that are not neurons (e.g., "granule", "glia").
+
+    Returns
+    -------
+    list of int
+        List of unique non-zero values in the ROI file that were cropped out.
+    """
     
     def compute_crop_slices(center_of_mass, shape, crop_size):
+        """
+        Computes the slices for cropping around a center of mass.
+
+        Parameters
+        ----------
+        center_of_mass : numpy.ndarray
+            The center of mass coordinates (z, y, x).
+        shape : tuple of int
+            The shape of the image data (z, y, x).
+        crop_size : tuple of int
+            The desired crop size (z, y, x).
+
+        Returns
+        -------
+        slices : list of slice
+            List of slice objects for each dimension.
+        """
         slices = []
         for dim in range(3):
             start = max(center_of_mass[dim] - crop_size[dim] // 2, 0)
@@ -150,6 +297,21 @@ def create_h5_from_nrrd(rgb_path, output_path, crop_roi_input_path,
         return slices
 
     def pad_with_background(data, pad_width):
+        """
+        Pads the data with background values.
+
+        Parameters
+        ----------
+        data : numpy.ndarray
+            The data to be padded.
+        pad_width : list of tuple
+            The pad width for each dimension.
+
+        Returns
+        -------
+        numpy.ndarray
+            The padded data.
+        """
         # Pad the background channel with ones
         data_padded_background = np.pad(data[0:1, :, :, :], pad_width, mode='constant', constant_values=1)
         # Pad the other channels with zeros
