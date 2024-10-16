@@ -7,11 +7,11 @@ def modify_edge_weights(mask, new_value=0.01):
 
     Parameters:
     - mask: A 3D numpy array representing the binary mask.
-    - new_value: The new value to assign to edge pixels (default is 0.5).
+    - new_value: The new value to assign to edge pixels (default is 0.01).
 
     Returns:
     - A 3D numpy array with modified edge weights.
-    """
+    """  
     # Ensure new_value is less than 1
     new_value = min(new_value, 1.0)
 
@@ -30,6 +30,35 @@ def modify_edge_weights(mask, new_value=0.01):
     return float_mask
 
 def create_probability_dict(img_roi_path, unet_predictions_path, is_gt=False, roi_edge_value=0.01, contamination_threshold=0.75):
+    """
+    Creates a probability dictionary mapping each ROI (Region of Interest) to its averaged class probabilities,
+    and identifies contaminated ROIs based on the AutoCellLabeler model predictions.
+
+    Parameters
+    ----------
+    img_roi_path : str
+        Path to the HDF5 file containing the ROI data under the 'roi' dataset.
+    unet_predictions_path : str
+        Path to the HDF5 file containing AutoCellLabeler model predictions.
+        If `is_gt` is True, predictions are read from 'label'; otherwise, from 'predictions'.
+    is_gt : bool, optional
+        If True, the function reads ground truth labels from the 'label' dataset in the HDF5 file.
+        Default is False.
+    roi_edge_value : float, optional
+        Value used in edge weight modification for ROIs.
+        Default is 0.01.
+    contamination_threshold : float, optional
+        Confidence threshold above which pixels are considered for contamination detection.
+        Default is 0.75.
+
+    Returns
+    -------
+    probability_dict : dict
+        A dictionary where keys are ROI IDs and values are arrays of averaged class probabilities.
+    contaminated_rois : dict
+        A dictionary of ROIs that are contaminated, mapping ROI IDs to a list of tuples
+        (class_index, pixel_count) for each contaminating class.
+    """
     contaminated_rois = {}
     # Step 1: Loading the Data
     with h5py.File(img_roi_path, 'r') as f:
@@ -97,6 +126,27 @@ def create_probability_dict(img_roi_path, unet_predictions_path, is_gt=False, ro
     return probability_dict, contaminated_rois
 
 def reorder_rois_by_max_prob(rois, roi_index):
+    """
+    Reorders the list of ROIs by moving the ROI at a given index to its correct position
+    based on its maximum probability.
+
+    Parameters
+    ----------
+    rois : list of dict
+        List of ROI dictionaries, each containing at least a 'max_prob' key.
+    roi_index : int
+        Index of the ROI in `rois` that needs to be moved.
+
+    Returns
+    -------
+    list of dict
+        The reordered list of ROIs.
+
+    Raises
+    ------
+    AssertionError
+        If the new position of the ROI would decrease its order in the list, which is not allowed.
+    """
     # Extract the ROI that needs to be moved
     roi_to_move = rois.pop(roi_index)
     
@@ -121,6 +171,70 @@ def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, n
         max_prob_decrease=0.3, min_prob=0.01, exclude_rois=[], lrswap_threshold=0.1, roi_matches=[],
         repeatable_labels=["granule", "glia", "UNKNOWN"], contamination_threshold=10, contamination_frac_threshold=0.2,
         confidence_demote=2, excluded_classes=EXCLUDED_CLASSES):
+    """
+    Generates an output CSV file containing neuron labels, coordinates, and additional information
+    based on the probability dictionary and other parameters.
+
+    Parameters
+    ----------
+    probability_dict : dict
+        Dictionary mapping ROI IDs to arrays of averaged class probabilities.
+    contaminated_rois : dict
+        Dictionary of ROIs that are contaminated, mapping ROI IDs to a list of tuples
+        (class_index, pixel_count) for each contaminating class.
+    roi_sizes : dict
+        Dictionary mapping ROI IDs to their sizes (number of pixels).
+    h5_path : str
+        Path to the HDF5 file containing neuron IDs under the 'neuron_ids' dataset.
+    nrrd_path : str
+        Path to the NRRD file containing ROI data.
+    output_csv_path : str
+        Path where the output CSV file will be saved.
+    max_distance : float, optional
+        Maximum distance to consider two ROIs as potentially merged.
+        Default is 8.
+    max_prob_decrease : float, optional
+        Maximum allowable decrease in probability when considering alternative labels.
+        Default is 0.3.
+    min_prob : float, optional
+        Minimum probability threshold to assign a neuron class.
+        Default is 0.01.
+    exclude_rois : list of int, optional
+        List of ROI IDs to exclude from processing.
+        Default is empty list.
+    lrswap_threshold : float, optional
+        Confidence threshold of the unlikelier of the 'L' or 'R' label for this neuron class. If above this level, it will be classified as '?' instead of either 'L' or 'R'.
+        Default is 0.1.
+    roi_matches : list of int, optional
+        List indicating each ROI's matches with the freely-moving dataset.
+        Default is empty list.
+    repeatable_labels : list of str, optional
+        Labels that can be assigned to multiple ROIs.
+        Default is ["granule", "glia", "UNKNOWN"].
+    contamination_threshold : int, optional
+        Threshold for the number of contaminating pixels to consider an ROI contaminated.
+        Default is 10.
+    contamination_frac_threshold : float, optional
+        Fraction of ROI size above which contamination is considered significant.
+        Default is 0.2.
+    confidence_demote : int, optional
+        Confidence level to demote contaminated or alternative labels to.
+        Default is 2.
+    excluded_classes : list of str, optional
+        List of neuron classes to exclude due to insufficient training data.
+        Default is EXCLUDED_CLASSES.
+
+    Returns
+    -------
+    list of dict
+        List containing information about each processed ROI, including neuron class,
+        coordinates, ROI ID, confidence, alternatives, and notes.
+
+    Notes
+    -----
+    The function writes an output CSV file with the following columns:
+    "Neuron Class", "Coordinates", "ROI ID", "Confidence", "Alternatives", "Notes".
+    """
     # Load the H5 file to get the name mapping
     with h5py.File(h5_path, 'r') as f:
         label_names = ["UNKNOWN"] + [name.decode('utf-8') for name in f['neuron_ids'][:]]
@@ -324,6 +438,23 @@ def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, n
     return output_data
 
 def get_roi_size(roi_path: str) -> int:
+    """
+    Calculates the sizes (number of pixels) of each ROI in the given HDF5 file.
+
+    Parameters
+    ----------
+    roi_path : str
+        Path to the HDF5 file containing ROI data under the 'roi' dataset.
+
+    Returns
+    -------
+    dict
+        Dictionary mapping ROI IDs to their sizes.
+
+    Notes
+    -----
+    The function assumes that ROI labels are positive integers starting from 1 up to the maximum label.
+    """
     roi_sizes = {}
     with h5py.File(roi_path, 'r') as f:
         data = f["roi"][:]
@@ -332,6 +463,19 @@ def get_roi_size(roi_path: str) -> int:
     return roi_sizes
 
 def swap_last_character(s: str) -> str:
+    """
+    Swaps the last character of a string from 'L' to 'R' or 'R' to 'L'.
+
+    Parameters
+    ----------
+    s : str
+        The input string.
+
+    Returns
+    -------
+    str
+        The string with its last character swapped if it is 'L' or 'R'; otherwise, returns the original string.
+    """
     if not s:
         return s
     
