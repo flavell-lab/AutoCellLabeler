@@ -71,7 +71,7 @@ def expand_nrrd_dimension(input_filepath, output_filepath):
 
 
 # Encodes neurons with collapsed (3D) labels and weights.
-def encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weight, weight_reduction, id_weight, bkg_weight, min_confidence, num_labels, non_neuron_ids):
+def encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weight, weight_reduction, id_weight, bkg_weight, unlabeled_weight, min_confidence, num_labels, non_neuron_ids, fm_roi_map = None, unalignedDict = None):
     """
     Generates one-hot encoded labels and a corresponding weight array for neuron segmentation and labeling tasks.
 
@@ -97,6 +97,10 @@ def encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weight, weig
         Dictionary mapping neuron IDs to the number of labels associated with them.
     non_neuron_ids : list of str
         List of IDs that are not neurons (e.g., "granule", "glia").
+    fm_roi_map : dict
+        Has keys of timepoint which contain roi. The value is the immobilized ROI. The dict is created from a file (of format t x rois) which can be generated using `AutoCellLabeler/notebook/extract_roi_matches.ipynb`. A None value indicates that these datasets are IM and don't need their ROIs converted
+    unalignedDict : dict
+        Unnecessary, simply for recording & aggregating ROIs that were unable to be aligned to IM
 
     Returns
     -------
@@ -105,9 +109,18 @@ def encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weight, weig
     weight_array : numpy.ndarray
         The corresponding weight array for the labels with the same shape as `encoded_labels`.
     """
-    # Reading the CSV and NRRD files
-    df = pd.read_csv(csv_file)
-    data, _ = nrrd.read(nrrd_file) # ROIs
+    # Read the NRRD file
+    data_raw, _ = nrrd.read(nrrd_file) # ROIs
+
+    if fm_roi_map is not None: # Indicates this is FM
+        # Match with immobilized - Create "data: immobiled-converted"
+        data_raw[data_raw >= len(fm_roi_map)] = 0 # Some of the data is too large, presumably unmatched ROIs
+        data = np.vectorize(fm_roi_map.get)(data_raw)
+        # data_im_conv[data_im_conv == -1] = 0 # BRIAN -FOR NOW
+        data[data == -1] = 185
+
+    all_rois = np.unique(data)
+
 
     foreground_mask = (data > 0)
 
@@ -115,9 +128,9 @@ def encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weight, weig
     roi_to_neuron, confidence_mapping = map_roi_to_neuron(csv_file, confidence_threshold=min_confidence)
 
     # Generate mask images for each ROI
-    roi_masks = {roi: (data == roi) for roi in roi_to_neuron.keys()}
-    roi_masks_nonmatch = {roi: np.logical_and(~roi_masks[roi], foreground_mask) for roi in roi_to_neuron.keys()}
-
+    roi_masks = {roi: (data == roi) for roi in all_rois}
+    roi_masks_nonmatch = {roi: np.logical_and(~roi_masks[roi], foreground_mask) for roi in all_rois} 
+    
 
     neuron_to_roi = {}
     for roi, neuron_ids in roi_to_neuron.items():
@@ -130,17 +143,31 @@ def encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weight, weig
             else:
                 neuron_to_roi[neuron_id] = [roi]
     
+    # For this weighting scheme, we don't throw out unlabeled ROIs
+    ## It's unclear if this actually helps
+    neuron_id = "UNLABELED"
+    unlabeled_rois = [roi for roi in all_rois if (roi not in roi_to_neuron.keys() and roi != 0)]
+    for roi in unlabeled_rois:
+        if neuron_id in neuron_to_roi: # One neuron can have multiple ROIs
+            neuron_to_roi[neuron_id].append(roi)
+        else:
+            neuron_to_roi[neuron_id] = [roi]
+
+    if unlabeled_weight is None:
+        unlabeled_weight = int(confidence_weight[-1]/len(unlabeled_rois)) # TODO: Might want to change this
+
     roi_weights = {}
 
     # One-Hot Encoding and Weight Array
-    encoded_labels = np.zeros(data.shape, dtype=LABEL_DTYPE) # We might need to increase the dtype if we pick up more neurons
-    weight_array = np.full(data.shape, bkg_weight, dtype=WEIGHT_DTYPE)  # Initialize with bkg_weight
+    encoded_labels = np.zeros(data_raw.shape, dtype=LABEL_DTYPE) # We might need to increase the dtype if we pick up more neurons
+    weight_array = np.full(data_raw.shape, bkg_weight, dtype=WEIGHT_DTYPE)  # Initialize with bkg_weight
     max_labels = np.max([num_labels[x] for x in num_labels if x not in non_neuron_ids])
     
     # Iterate over unique neuron IDs in neuron_to_roi
     for neuron_id in neuron_to_roi.keys():
         if neuron_id in neuron_ids_list:
-            process_neuron_id(neuron_id, neuron_to_roi, data, confidence_mapping, confidence_weight, id_weight, max_labels, num_labels, neuron_ids_list, weight_reduction, encoded_labels, weight_array, roi_weights, roi_masks, roi_masks_nonmatch)
+            process_neuron_id(neuron_id, neuron_to_roi, data, confidence_mapping, confidence_weight, id_weight, max_labels, num_labels, neuron_ids_list, weight_reduction, encoded_labels, weight_array, roi_weights, roi_masks, roi_masks_nonmatch, unlabeled_weight, unalignedDict)
+    
 
     # Loop through ROI weights to set non-ID channels
     for roi, weights in roi_weights.items():
@@ -152,7 +179,7 @@ def encode_neurons(csv_file, nrrd_file, neuron_ids_list, confidence_weight, weig
 
 
 def process_neuron_id(neuron_id, neuron_to_roi, data, confidence_mapping, confidence_weight, id_weight, max_labels, num_labels,
-                    neuron_ids_list, weight_reduction, encoded_labels, weight_array, roi_weights, roi_masks, roi_masks_nonmatch):
+                    neuron_ids_list, weight_reduction, encoded_labels, weight_array, roi_weights, roi_masks, roi_masks_nonmatch, unlabeled_weight, unalignedDict = None):
     """
     Updates the one-hot encoded labels and weight arrays for a specific neuron ID.
 
@@ -188,6 +215,10 @@ def process_neuron_id(neuron_id, neuron_to_roi, data, confidence_mapping, confid
         Dictionary of masks for each ROI.
     roi_masks_nonmatch : dict
         Dictionary of masks for regions not matching each ROI.
+    unlabeled_weight : int
+        The weight we want to assign to the unlabeled ROIs. My sense is that a higher value here makes the network more willing to guess but generally less confident.
+    unalignedDict : dict
+        Unnecessary, simply for recording & aggregating ROIs that were unable to be aligned to IM
 
     Returns
     -------
@@ -195,12 +226,25 @@ def process_neuron_id(neuron_id, neuron_to_roi, data, confidence_mapping, confid
         Updates `one_hot_encoded`, `weight_array`, and `roi_weights` in place.
     """
     for roi in neuron_to_roi[neuron_id]:
-        mask = roi_masks[roi]
+        try:
+            mask = roi_masks[roi]
+        except KeyError:
+            if unalignedDict is not None:
+                unalignedDict[roi] = (unalignedDict.get(roi, (0, None))[0] + 1, neuron_id)
+            else:
+                print(f"Imobilized ROI {roi} ({neuron_id}) not aligned from fm")
+                # Not going to write a check, but if you get here in IM it's probably an issue...
+            return
         mask_nonmatch = roi_masks_nonmatch[roi]
 
         # Apply confidence weight
-        confidence_level = confidence_mapping[roi]
-        weight = confidence_weight[min(int(confidence_level) - 1, len(confidence_weight)-1)]
+        if neuron_id == "UNLABELED":
+            weight = unlabeled_weight
+            scaled_weight = weight * 1 # Maybe scale later
+        else:
+            confidence_level = confidence_mapping[roi]
+            weight = confidence_weight[min(int(confidence_level) - 1, len(confidence_weight)-1)]
+            scaled_weight = np.round(weight * (max_labels / num_labels.get(neuron_id, 1))).astype(WEIGHT_DTYPE)
 
         # Adjust weight for uncertain labels
         matches = [neuron_id]
@@ -210,11 +254,8 @@ def process_neuron_id(neuron_id, neuron_to_roi, data, confidence_mapping, confid
                 ValueError("Same ID as background")
             encoded_labels[mask] = match_idx
             
-            weight_array[mask] = np.round(weight * (max_labels / num_labels.get(neuron_id, 1))).astype(WEIGHT_DTYPE)
+            weight_array[mask] = scaled_weight
 
-            # The idea here is that we can punish the network more for incorrectly labeling something as something that's already been labeled
-            # But we want to make sure we don't overrule an actual label's weight
-            weight_array[mask_nonmatch] = np.maximum(weight_array[mask_nonmatch], np.round(id_weight * weight).astype(WEIGHT_DTYPE))
 
         # Store the maximum weight for this ROI
         if roi in roi_weights:
@@ -222,10 +263,10 @@ def process_neuron_id(neuron_id, neuron_to_roi, data, confidence_mapping, confid
         else:
             roi_weights[roi] = [weight]
 
-def create_h5_from_nrrd(rgb_path, output_path, crop_roi_input_path, 
+def create_h5_from_nrrd(rgb_path, output_path, crop_roi_input_path,
                         crop_roi_output_path, crop_size, num_labels, θh_pos_is_ventral, foreground_weights=[10, 50, 600, 900, 1000], 
-                        question_weight_reduction=5, id_weight=0.3, background_weight=1, min_confidence=2,
-                        label_file=None, neuron_ids_list_file=None, all_red_path=None, non_neuron_ids=["granule", "glia"]):
+                        question_weight_reduction=5, id_weight=0.3, background_weight=1, unlabeled_weight=1, min_confidence=2,
+                        label_file=None, neuron_ids_list_file=None, all_red_path=None, non_neuron_ids=["granule", "glia"], unalignedDict = None, is_freely_moving = False, freely_moving_map_file = None):
     """
     Creates an HDF5 file from NRRD image data for neuron segmentation and labeling, including optional labels and weights.
 
@@ -323,32 +364,64 @@ def create_h5_from_nrrd(rgb_path, output_path, crop_roi_input_path,
         data_padded_others = np.pad(data, pad_width, mode='constant', constant_values=0)
         return data_padded_others #np.concatenate([data_padded_background, data_padded_others], axis=0)
     
-    # Step 1: Reading the NRRD file
-    img_rgb, _ = nrrd.read(rgb_path)
-    
-    # Round median value, set negative values to 0, and convert to uint16
-    median_val = np.round(np.median(img_rgb)).astype(RAW_DTYPE)
-    img_rgb[img_rgb < 0] = 0
+    if not is_freely_moving:
+        # Step 1: Reading the NRRD file
+        img_rgb, _ = nrrd.read(rgb_path)
+        
+        # Round median value, set negative values to 0
+        median_val = np.round(np.median(img_rgb))
+        img_rgb[img_rgb < 0] = 0
 
-    # If all_red_path is provided, read the NRRD file and append it to img_rgb
-    if all_red_path is not None:
-        img_red, _ = nrrd.read(all_red_path)
-        img_rgb = np.concatenate([img_rgb, img_red[..., np.newaxis]], axis=-1)
-        img_rgb = img_rgb.astype(RAW_DTYPE)
+        # If all_red_path is provided, read the NRRD file and append it to img_rgb
+        if all_red_path is not None:
+            img_red, _ = nrrd.read(all_red_path)
+            img_rgb = np.concatenate([img_rgb, img_red[..., np.newaxis]], axis=-1)
+        # TODO: Why is this done after getting the median? Was there a reason behind that?
 
+    else:
+        # Read and convert to uint16
+        img_rgb, _ = nrrd.read(all_red_path)
+
+        # Round median value, set negative values to 0
+        median_val = np.round(np.median(img_rgb))
+        img_rgb[img_rgb < 0] = 0
+
+    img_rgb = img_rgb.astype(RAW_DTYPE)
     
-    # Permute dimensions for the img_rgb from WxHxDxC to CxDxHxW
+    # Permute dimensions for the img_red from WxHxDxC to CxDxHxW
     img_rgb = np.transpose(img_rgb, (3, 2, 1, 0)) # Brian: ok but isn't it faster to have color last?
 
     img_roi, _ = nrrd.read(crop_roi_input_path)
+
+    if is_freely_moving:
+        # Parse dataset and timepoint from filename 
+        dataset, t = os.path.splitext(os.path.split(output_path)[1])[0].split("_")
+    
+        # Read in the conversion from FM ROI #s to Immobilized ROI #s
+        with h5py.File(freely_moving_map_file, 'r') as f:
+            try:
+                fm_roi_map = dict(enumerate(f[dataset][:,int(t) - 1], 1)) # Need to start at 1 because         JULIA
+                fm_roi_map[0] = 0
+            except:
+                print(f"Dataset {dataset} not present in fm ROI match file")
+                return
+            
+        # Convert what will become roi_crop/dataset.h5 to the imobilized numbering scheme 
+        img_roi[img_roi >= len(fm_roi_map)] = 0 # Some of the data is too large, presumably unmatched ROIs
+        img_roi = np.vectorize(fm_roi_map.get)(img_roi)
+        # img_roi[img_roi == -1] = 0 # The prediction analysis just ignores negative ROIs - # TODO: Check the conversion to UNKNOWN in the weighting scheme 
+    else:
+        fm_roi_map = None
+
     # Permute dimensions for the img_roi data from WxHxD to DxHxW
     img_roi = np.transpose(img_roi, (2, 1, 0))
 
     if label_file is not None and neuron_ids_list_file is not None:
         with h5py.File(neuron_ids_list_file, 'r') as f:
-            ids_list = ["BACKGROUND"] + [name.decode('utf-8') for name in f['neuron_ids'][:]] # Adding "background" ensures the label 0 is reserved
+            ids_list = ["BACKGROUND"] + [name.decode('utf-8') for name in f['neuron_ids'][:]] + ['UNLABELED']  # Adding "background" ensures the label 0 is reserved
+            # # BRIAN TODO IMPORTANT: For now, we're going to use the -1 encoding since it didn't seem to significantly improve the previous version. Maybe change
 
-        encoded_labels, weight_data = encode_neurons(label_file, crop_roi_input_path, ids_list, foreground_weights, question_weight_reduction, id_weight, background_weight, min_confidence, num_labels, non_neuron_ids)
+        encoded_labels, weight_data = encode_neurons(label_file, crop_roi_input_path, ids_list, foreground_weights, question_weight_reduction, id_weight, background_weight, unlabeled_weight, min_confidence, num_labels, non_neuron_ids, fm_roi_map, unalignedDict)
 
         # Permute dimensions from WxHxD to DxHxW
         encoded_labels = np.transpose(encoded_labels, (2, 1, 0))
