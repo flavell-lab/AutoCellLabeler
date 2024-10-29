@@ -1,5 +1,8 @@
 import h5py, nrrd, itertools, os, re, sys, csv
-import numpy as np
+import os 
+assert 'CUDA_VISIBLE_DEVICES' in os.environ
+import torch
+
 
 def modify_edge_weights(mask, new_value=0.01):
     """
@@ -11,15 +14,15 @@ def modify_edge_weights(mask, new_value=0.01):
 
     Returns:
     - A 3D numpy array with modified edge weights.
-    """  
+    """
     # Ensure new_value is less than 1
     new_value = min(new_value, 1.0)
 
     # Convert mask to float for manipulation
-    float_mask = mask.astype(float)
+    float_mask = mask.float()
 
     # Find edges by applying a gradient operator, summing the absolute values across each dimension
-    gradient = np.sum(np.abs(np.gradient(float_mask)), axis=0)
+    gradient = torch.sum(torch.abs(torch.stack(torch.gradient(float_mask))), axis=0)
 
     # Edge pixels will have a gradient greater than 0
     edges = gradient > 0
@@ -62,33 +65,33 @@ def create_probability_dict(img_roi_path, unet_predictions_path, is_gt=False, ro
     contaminated_rois = {}
     # Step 1: Loading the Data
     with h5py.File(img_roi_path, 'r') as f:
-        img_roi_data = f['roi'][:]
+        img_roi_data = torch.tensor(f['roi'][:], device="cuda")
     
     if is_gt:
         with h5py.File(unet_predictions_path, 'r') as f:
-            unet_predictions = f['label'][:]
+            unet_predictions = torch.tensor(f['label'][:], device="cuda")
     else:
         with h5py.File(unet_predictions_path, 'r') as f:
-            unet_predictions = f['predictions'][:]
+            unet_predictions = torch.tensor(f['predictions'][:], device="cuda")
 
     # Step 2: Handling Different Shapes
-    unet_predictions = np.transpose(unet_predictions, (1, 2, 3, 0))  # Convert CxDxHxW to DxHxWxC
+    unet_predictions = torch.permute(unet_predictions, (1, 2, 3, 0))  # Convert CxDxHxW to DxHxWxC
 
     # Step 3: Constructing the Probability Dictionary
     probability_dict = {}
     
-    unique_rois = np.unique(img_roi_data)
+    unique_rois = torch.unique(img_roi_data)
     # Exclude the background (ROI=0)
-    unique_rois = unique_rois[unique_rois != 0]
+    unique_rois = unique_rois[unique_rois != 0].cpu()
     
     for roi in unique_rois:
+        roi = int(roi)
         roi_mask = img_roi_data == roi
 
-        per_pixel_predictions = np.argmax(unet_predictions[roi_mask], axis=1)
-        per_pixel_confidence = np.max(unet_predictions[roi_mask], axis=1)
+        per_pixel_confidence, per_pixel_predictions = torch.max(unet_predictions[roi_mask], axis=1)
         confidence_mask = per_pixel_confidence > contamination_threshold
         per_pixel_predictions = per_pixel_predictions[confidence_mask]
-        unique_predictions = np.unique(per_pixel_predictions)
+        unique_predictions = torch.unique(per_pixel_predictions)
         nonzero_unique_predictions = unique_predictions[unique_predictions != 0]
         frequent_predictions = []
         if len(nonzero_unique_predictions) > 1:
@@ -119,10 +122,11 @@ def create_probability_dict(img_roi_path, unet_predictions_path, is_gt=False, ro
         avg_probs /= avg_probs.sum()
 
         # Convert to dictionary format (assuming this part remains the same)
-        channel_probs = avg_probs        
+        channel_probs = avg_probs.cpu().numpy()
         
         probability_dict[roi] = channel_probs
 
+    torch.cuda.empty_cache() # If you run this in a jupyter notebook, there's a tendency to hang on to the memory, so this should help
     return probability_dict, contaminated_rois
 
 def reorder_rois_by_max_prob(rois, roi_index):
@@ -167,8 +171,8 @@ def reorder_rois_by_max_prob(rois, roi_index):
 # classes with too few detections in training data to believe the labels
 EXCLUDED_CLASSES = ['glia', 'granule', 'RIFL', 'RIFR', 'RIFL', 'RIFR', 'AFDL', 'AFDR', 'RMFL', 'RMFR', 'SIADL', 'SIADR', 'VA01', 'VD01', 'AVG', 'DD01', 'SABVL', 'SABVR', 'SABVL', 'SABVR', 'SIBDL', 'SIBDR', 'ADFL', 'RIGL', 'RIGR', 'RIGL', 'RIGR', 'AVFL', 'DB02']
 
-def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, nrrd_path, output_csv_path, max_distance=8, 
-        max_prob_decrease=0.3, min_prob=0.01, exclude_rois=[], lrswap_threshold=0.1, roi_matches=[],
+def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, roi_path, output_csv_path, max_distance=8, 
+        max_prob_decrease=0.3, min_prob=0.01, exclude_rois=[-1], lrswap_threshold=0.1, roi_matches=[],
         repeatable_labels=["granule", "glia", "UNKNOWN"], contamination_threshold=10, contamination_frac_threshold=0.2,
         confidence_demote=2, excluded_classes=EXCLUDED_CLASSES):
     """
@@ -186,8 +190,8 @@ def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, n
         Dictionary mapping ROI IDs to their sizes (number of pixels).
     h5_path : str
         Path to the HDF5 file containing neuron IDs under the 'neuron_ids' dataset.
-    nrrd_path : str
-        Path to the NRRD file containing ROI data.
+    roi_path : str
+        Path to the NRRD or H5 file containing ROI data.
     output_csv_path : str
         Path where the output CSV file will be saved.
     max_distance : float, optional
@@ -240,8 +244,12 @@ def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, n
         label_names = ["UNKNOWN"] + [name.decode('utf-8') for name in f['neuron_ids'][:]]
     
     # Load the NRRD file
-    data, _ = nrrd.read(nrrd_path)
-    
+    try:
+        data, _ = nrrd.read(roi_path)
+    except:
+        with h5py.File(roi_path, 'r') as f:
+            data = torch.tensor(f.get("roi"))
+
     # Track occurrences of neuron labels and their centers of mass
     neuron_tracker = {}
 
@@ -251,7 +259,7 @@ def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, n
         if roi_id in exclude_rois:
             continue
         # Neuron Class (index and probability of most likely neuron class)
-        sorted_indices = np.argsort(probabilities)[::-1]
+        sorted_indices = torch.argsort(probabilities)[::-1]
         most_likely_class_index = sorted_indices[0]
         most_likely_prob = probabilities[most_likely_class_index]
 
@@ -259,8 +267,9 @@ def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, n
         max_prob = most_likely_prob
 
         # Coordinates (center of mass for the ROI label)
-        coordinates = np.argwhere(data == roi_id)
-        center_of_mass = tuple(map(lambda x: int(round(x)) + 1, coordinates.mean(axis=0)))
+        coordinates = torch.argwhere(data == roi_id)
+        center_of_mass = tuple(map(lambda x: int(round(x)) + 1, coordinates.mean(axis=0))) # If you get an error with this line, your roi_path file is likely wrong
+        
 
         # Add to list for further processing
         rois.append({
@@ -308,7 +317,7 @@ def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, n
 
         if neuron_class in neuron_tracker and neuron_class not in repeatable_labels:
             for other_roi, other_roi_id, other_center_of_mass in neuron_tracker[neuron_class]:
-                distance = np.linalg.norm(np.array(center_of_mass) - np.array(other_center_of_mass))
+                distance = torch.linalg.norm(torch.tensor(center_of_mass) - torch.tensor(other_center_of_mass))
                 if distance < max_distance:
                     output_data[other_roi]["notes"] += f"ROI likely merged with {roi_id}. "
                     split_roi = other_roi_id
@@ -384,7 +393,7 @@ def output_label_file(probability_dict, contaminated_rois, roi_sizes, h5_path, n
                 contam_to_txt = contam_to_txt[:-2]
             roi_size = roi_sizes.get(roi_id, 1)
             if roi_size == 1:
-                print("WARNING: ROI size 1 for ROI ", roi_id, " in ", nrrd_path, ". Check for errors.")
+                print("WARNING: ROI size 1 for ROI ", roi_id, " in ", roi_path, ". Check for errors.")
             if (sum_nonmax_contam >= contamination_threshold) or (sum_nonmax_contam / roi_size >= contamination_frac_threshold):
                 notes += f"ROI possibly contaminated - " + contam_to_txt + ". "
                 contaminated = True
@@ -458,8 +467,8 @@ def get_roi_size(roi_path: str) -> int:
     roi_sizes = {}
     with h5py.File(roi_path, 'r') as f:
         data = f["roi"][:]
-        for roi in range(1, np.max(data) + 1):
-            roi_sizes[roi] = np.sum(data == roi)
+        for roi in range(1, torch.max(data) + 1):
+            roi_sizes[roi] = torch.sum(data == roi)
     return roi_sizes
 
 def swap_last_character(s: str) -> str:
